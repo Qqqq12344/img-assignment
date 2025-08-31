@@ -1,4 +1,3 @@
-import torch
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -7,6 +6,7 @@ import logging
 from torchvision import transforms
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 import warnings
+import torch
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -24,7 +24,7 @@ class YOLODetector:
     Generic YOLO Detector for YOLOv8 / YOLOv10 / YOLOv11 / YOLOv12
     
     BUSINESS RULE: Detect vehicles (cars, motorcycles, buses, trucks)
-    PERFORMANCE TARGET: ≥90% mAP, <5s processing time (1080p)
+    PERFORMANCE TARGET: â‰¥90% mAP, <5s processing time (1080p)
     """
 
     def __init__(self, model_path="yolov8n.pt", confidence_threshold=0.5):
@@ -60,57 +60,48 @@ class YOLODetector:
             logger.error(f"Failed to load {model_path}: {e}")
             raise ModelLoadError(f"{model_path} initialization failed: {e}")
 
+    # detection_algorithms.py  (YOLODetector)
+
     def preprocess_image(self, image):
-        """
-        Preprocess image for YOLO inference
-        """
-        height, width = image.shape[:2]
+        h0, w0 = image.shape[:2]
         max_size = 1280
-        if max(height, width) > max_size:
-            scale = max_size / max(height, width)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-        return image
+        if max(h0, w0) > max_size:
+            scale = max_size / max(h0, w0)
+            w, h = int(w0 * scale), int(h0 * scale)
+            resized = cv2.resize(image, (w, h), interpolation=cv2.INTER_LINEAR)
+            return resized, (w0 / w, h0 / h)  # scale-back factors (sx, sy)
+        return image, (1.0, 1.0)
 
     def detect(self, image):
-        """
-        Perform vehicle detection
-        """
         try:
-            processed_image = self.preprocess_image(image)
-
-            results = self.model(
-                processed_image,
-                conf=self.confidence_threshold,
-                verbose=False
-            )
+            processed_image, (sx, sy) = self.preprocess_image(image)
+            results = self.model(processed_image, conf=self.confidence_threshold, verbose=False)
 
             detections = []
             for result in results:
                 boxes = result.boxes
-                if boxes is not None:
-                    for i in range(len(boxes)):
-                        xyxy = boxes.xyxy[i].cpu().numpy()
-                        confidence = float(boxes.conf[i].cpu().numpy())
-                        class_id = int(boxes.cls[i].cpu().numpy())
-                        class_name = self.model.names[class_id]
+                if boxes is None: 
+                    continue
+                for i in range(len(boxes)):
+                    xyxy = boxes.xyxy[i].cpu().numpy()
+                    conf = float(boxes.conf[i].cpu().numpy())
+                    cls_id = int(boxes.cls[i].cpu().numpy())
+                    cls_name = self.model.names[cls_id]
 
-                        # Only keep vehicle classes
-                        if class_name in ['car', 'motorcycle', 'bus', 'truck']:
-                            detections.append({
-                                'bbox': [float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])],
-                                'cls': class_id,
-                                'conf': confidence,
-                                'cls_name': class_name
-                            })
-
-            logger.info(f"{self.model_path} detected {len(detections)} vehicles")
+                    if cls_name in ['car','motorcycle','bus','truck']:
+                        x1, y1, x2, y2 = xyxy
+                        # map back to original image
+                        detections.append({
+                            'bbox': [float(x1*sx), float(y1*sy), float(x2*sx), float(y2*sy)],
+                            'cls': cls_id,
+                            'conf': conf,
+                            'cls_name': cls_name
+                        })
             return detections
-
         except Exception as e:
             logger.error(f"{self.model_path} detection error: {e}")
             return []
+
 
 
 # Convenience subclasses (so you can instantiate without typing full model path)
@@ -242,12 +233,13 @@ class FasterRCNN:
             logger.error(f"Faster R-CNN detection error: {e}")
             return []
 
+
 class EfficientDet:
     """
     EfficientDet Object Detection - Optimized for resource efficiency
     
     BUSINESS RULE: Low-resource vehicle detection for edge deployment
-    PERFORMANCE TARGET: ≥88% mAP, minimal memory/CPU usage
+    PERFORMANCE TARGET: â‰¥88% mAP, minimal memory/CPU usage
     """
     
     def __init__(self, confidence_threshold=0.5):
@@ -286,80 +278,46 @@ class EfficientDet:
             logger.error(f"Failed to load EfficientDet: {e}")
             raise ModelLoadError(f"EfficientDet initialization failed: {e}")
     
+    # detection_algorithms.py (EfficientDet)
+
     def preprocess_image(self, image):
-        """
-        Preprocess image with aggressive optimization for efficiency
-        
-        Args:
-            image (np.ndarray): Input image in BGR format
-            
-        Returns:
-            np.ndarray: Heavily optimized image
-        """
-        height, width = image.shape[:2]
-        
-        # Aggressive resizing for efficiency (smaller than other models)
-        max_size = 640  # Smaller than YOLOv8's 1280
-        if max(height, width) > max_size:
-            scale = max_size / max(height, width)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            
-            # Use nearest neighbor for fastest interpolation
-            image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
-        
-        return image
-    
+        h0, w0 = image.shape[:2]
+        max_size = 640
+        if max(h0, w0) > max_size:
+            scale = max_size / max(h0, w0)
+            w, h = int(w0 * scale), int(h0 * scale)
+            resized = cv2.resize(image, (w, h), interpolation=cv2.INTER_NEAREST)
+            return resized, (w0 / w, h0 / h)
+        return image, (1.0, 1.0)
+
     def detect(self, image):
-        """
-        Perform efficient vehicle detection
-        
-        Args:
-            image (np.ndarray): Input image in BGR format
-            
-        Returns:
-            list: List of detections with format:
-                  [{'bbox': [x1,y1,x2,y2], 'cls': int, 'conf': float, 'cls_name': str}]
-        """
         try:
-            # Aggressive preprocessing for efficiency
-            processed_image = self.preprocess_image(image)
-            
-            # Run inference with optimized settings
-            results = self.model(
-                processed_image, 
-                conf=self.confidence_threshold,
-                iou=0.7,  # Higher IoU threshold to reduce computation
-                verbose=False,
-                half=True if self.device == 'cuda' else False  # FP16 inference on GPU
-            )
-            
-            # Parse results (same as YOLOv8 but with efficiency focus)
+            processed_image, (sx, sy) = self.preprocess_image(image)
+            results = self.model(processed_image, conf=self.confidence_threshold, iou=0.7, verbose=False,
+                                half=True if self.device=='cuda' else False)
             detections = []
             for result in results:
                 boxes = result.boxes
-                if boxes is not None:
-                    for i in range(len(boxes)):
-                        xyxy = boxes.xyxy[i].cpu().numpy()
-                        confidence = float(boxes.conf[i].cpu().numpy())
-                        class_id = int(boxes.cls[i].cpu().numpy())
-                        
-                        class_name = self.model.names[class_id]
-                        if class_name in ['car', 'motorcycle', 'bus', 'truck']:
-                            detection = {
-                                'bbox': [float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])],
-                                'cls': class_id,
-                                'conf': confidence,
-                                'cls_name': class_name
-                            }
-                            detections.append(detection)
-            
-            logger.info(f"EfficientDet detected {len(detections)} vehicles")
+                if boxes is None:
+                    continue
+                for i in range(len(boxes)):
+                    xyxy = boxes.xyxy[i].cpu().numpy()
+                    conf = float(boxes.conf[i].cpu().numpy())
+                    cls_id = int(boxes.cls[i].cpu().numpy())
+                    cls_name = self.model.names[cls_id]
+                    if cls_name in ['car','motorcycle','bus','truck']:
+                        x1, y1, x2, y2 = xyxy
+                        detections.append({
+                            'bbox': [float(x1*sx), float(y1*sy), float(x2*sx), float(y2*sy)],
+                            'cls': cls_id,
+                            'conf': conf,
+                            'cls_name': cls_name
+                        })
             return detections
-            
         except Exception as e:
             logger.error(f"EfficientDet detection error: {e}")
             return []
+
 
 # Utility functions for model comparison and optimization
 
@@ -422,4 +380,4 @@ def optimize_models_for_production():
         
     except Exception as e:
         logger.error(f"Production optimization failed: {e}")
-        return optimization_status
+        return optimization_status 
