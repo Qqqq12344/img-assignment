@@ -456,6 +456,16 @@
                             <button class="zone-btn handicap" data-zone="handicap">♿ Handicap</button>
                             <button class="zone-btn no-parking" data-zone="no-parking">🚫 No Parking</button>
                         </div>
+                        <h3>🧠 Detection Source</h3>
+                        <select id="algo-select" class="btn" style="padding:8px;border:1px solid #ccc;border-radius:8px">
+                        <option value="yolov8" selected>YOLOv8 (default)</option>
+                        <option value="yolov10">YOLOv10</option>
+                        <option value="yolov11">YOLOv11</option>
+                        <option value="yolov12">YOLOv12</option>
+                        <option value="faster_rcnn">Faster R-CNN</option>
+                        <option value="efficient_det">EfficientDet</option>
+                        </select>
+
                         <p style="font-size: 0.8rem; color: #6c757d;">
                             Click a zone type, then click on the image to draw polygon points. Double-click to finish.
                         </p>
@@ -562,6 +572,45 @@
             initializeCanvas();
         });
 
+       let selectedAlgo = 'yolov8'; // default
+
+        document.addEventListener('change', (e) => {
+            if (e.target && e.target.id === 'algo-select') {
+                selectedAlgo = e.target.value;
+                resetUIForModelChange();   // 👈 full reset to original image
+            }
+        });
+
+        function resetUIForModelChange() {
+            // Clear zones, current drawing, and all results
+            zones = [];
+            currentZonePoints = [];
+            currentZoneType = null;
+            isDrawing = false;
+
+            // Nuke detections & violations so canvas shows only the raw image
+            analysisResults = null;
+
+            // Hide results panel & reset quick stats
+            document.getElementById('results-section').style.display = 'none';
+            document.getElementById('zone-count').textContent = '0';
+            document.getElementById('violation-count').textContent = '0';
+            document.getElementById('total-vehicles').textContent = '0';
+            document.getElementById('total-occupancy').textContent = '0%';
+
+            // Remove active zone button state
+            document.querySelectorAll('.zone-btn').forEach(btn => btn.classList.remove('active'));
+            canvas.style.cursor = 'default';
+
+            // Redraw just the image
+            redrawCanvas();
+
+            // Recompute UI enablement
+            updateUI();
+        }
+
+
+
         function initializeEventListeners() {
             // File upload
             const uploadZone = document.getElementById('upload-zone');
@@ -667,12 +716,15 @@
                     height: img.height
                 };
 
-                // Setup canvas
-                const containerWidth = canvas.parentElement.clientWidth - 40;
-                const containerHeight = Math.min(600, img.height * (containerWidth / img.width));
-                
-                canvas.width = containerWidth;
-                canvas.height = containerHeight;
+                const fixedWidth = 723;
+                const aspectRatio = img.width / img.height;
+
+                const newWidth = fixedWidth;
+                const newHeight = fixedWidth / aspectRatio;
+
+                canvas.width = newWidth;
+                canvas.height = newHeight;
+
                 
                 // Draw image
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -852,9 +904,10 @@
         }
 
         function drawDetections() {
-            if (!analysisResults || !analysisResults.detections.yolov8) return;
+            const detBlock = analysisResults?.detections?.[selectedAlgo];
+            if (!detBlock || !detBlock.detections) return;
+            const detections = detBlock.detections;
 
-            const detections = analysisResults.detections.yolov8.detections;
             const scaleX = canvas.width / currentImage.width;
             const scaleY = canvas.height / currentImage.height;
 
@@ -873,17 +926,34 @@
                 ctx.strokeRect(canvasX1, canvasY1, canvasX2 - canvasX1, canvasY2 - canvasY1);
 
                 // Draw label
+                // Draw label (now includes running vehicle number)
                 ctx.fillStyle = '#00FF00';
                 ctx.font = '12px Arial';
                 ctx.textAlign = 'left';
-                
-                const label = `${detection.cls_name} (${(detection.conf * 100).toFixed(1)}%)`;
+
+                const vehNo = index + 1;
+                const label = `#${vehNo} ${detection.cls_name} ${(detection.conf * 100).toFixed(1)}%`;
                 const textWidth = ctx.measureText(label).width;
-                
-                ctx.fillRect(canvasX1, canvasY1 - 20, textWidth + 8, 20);
+
+                // background for text
+                ctx.fillRect(canvasX1, canvasY1 - 20, textWidth + 10, 20);
+
+                // text
                 ctx.fillStyle = '#FFFFFF';
-                ctx.fillText(label, canvasX1 + 4, canvasY1 - 6);
+                ctx.fillText(label, canvasX1 + 5, canvasY1 - 6);
+
+                // optional: a small corner badge with just the number
+                ctx.fillStyle = '#00FF00';
+                ctx.fillRect(canvasX1 - 18, canvasY1 - 18, 16, 16);
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 11px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(String(vehNo), canvasX1 - 10, canvasY1 - 6);
+
             });
+            
+            console.log('Selected:', selectedAlgo, 'classes:', detections.map(d => d.cls_name));
+
 
             // Highlight violations
             if (analysisResults.violations) {
@@ -914,12 +984,18 @@
             currentZoneType = null;
             isDrawing = false;
             canvas.style.cursor = 'default';
-            
             document.querySelectorAll('.zone-btn').forEach(btn => btn.classList.remove('active'));
-            
+
+            // ✅ Clear violations & related stats
+            if (analysisResults && Array.isArray(analysisResults.violations)) {
+                analysisResults.violations = [];
+            }
+            document.getElementById('violation-count').textContent = '0';
+
             updateUI();
             redrawCanvas();
         }
+
 
         function resetAll() {
             currentImage = null;
@@ -976,8 +1052,10 @@
                 },
                 body: JSON.stringify({
                     filename: currentImage.filename,
-                    zones: zonesData
+                    zones: zonesData,
+                    selected_algo: selectedAlgo   // 👈 send dropdown choice
                 })
+
             })
             .then(response => response.json())
             .then(data => {
@@ -1077,6 +1155,11 @@
             violations.forEach(violation => {
                 const item = document.createElement('div');
                 item.className = `violation-item ${violation.severity}`;
+
+                const vehNum = (violation.vehicle_detection_idx != null)
+                                ? `#${violation.vehicle_detection_idx + 1}`
+                                : 'N/A';
+
                 
                 item.innerHTML = `
                     <div style="display: flex; justify-content: space-between; align-items: start;">
@@ -1086,9 +1169,10 @@
                             </h5>
                             <p style="margin: 0 0 5px 0;">${violation.message}</p>
                             <small style="color: #6c757d;">
-                                Zone: ${violation.zone_type} | Vehicle: ${violation.vehicle_type} | 
+                                Vehicle ${vehNum} | Type: ${violation.vehicle_type} | Zone: ${violation.zone_type} |
                                 Confidence: ${(violation.vehicle_confidence * 100).toFixed(1)}%
                             </small>
+
                         </div>
                         <span class="badge" style="background: var(--bs-${violation.severity}); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem;">
                             ${violation.severity.toUpperCase()}
@@ -1103,8 +1187,7 @@
         function updateOccupancyStats(data) {
             document.getElementById('total-occupancy').textContent = data.occupancy + '%';
             document.getElementById('total-vehicles').textContent = 
-                data.detections.yolov8 ? data.detections.yolov8.vehicle_count : 0;
-            document.getElementById('total-zones').textContent = zones.length;
+                data.detections[selectedAlgo] ? data.detections[selectedAlgo].vehicle_count : 0;
             document.getElementById('violation-count').textContent = 
                 data.violations ? data.violations.length : 0;
         }
@@ -1120,4 +1203,4 @@
         }
     </script>
 </body>
-</html>
+</html>  
