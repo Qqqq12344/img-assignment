@@ -464,3 +464,4 @@ def calculate_occupancy(detections: List[Dict], total_spots: int) -> float:
     occupancy = (occupied_spots / total_spots) * 100
     
     return round(occupancy, 1)
+
