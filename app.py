@@ -1,4 +1,3 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory
 import os
 import cv2
 import numpy as np
@@ -8,8 +7,10 @@ import time
 from werkzeug.utils import secure_filename
 # Import extended YOLO classes
 from detection_algorithms import YOLOv8Detector, YOLOv10Detector, YOLOv11Detector, YOLOv12Detector, FasterRCNN, EfficientDet
-from violation_checker import ZoneAnalyzer
 import logging
+from flask import Flask, render_template, request, jsonify, send_from_directory 
+from violation_checker import ZoneAnalyzer
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +25,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Initialize detection models
 try:
+    zone_analyzer = ZoneAnalyzer()
     yolo_v8 = YOLOv8Detector(model_size="n", confidence_threshold=0.5)
     yolo_v10 = YOLOv10Detector(model_size="n", confidence_threshold=0.5)
     yolo_v11 = YOLOv11Detector(model_size="n", confidence_threshold=0.5)
@@ -31,7 +33,6 @@ try:
     
     faster_rcnn = FasterRCNN()
     efficient_det = EfficientDet()
-    zone_analyzer = ZoneAnalyzer()
     logger.info("All models loaded successfully")
 except Exception as e:
     logger.error(f"Error loading models: {e}")
@@ -100,7 +101,15 @@ def analyze_image():
             return jsonify({'error': 'Missing filename'}), 400
         
         filename = data['filename']
-        zones = data.get('zones', [])
+        zones_raw = data.get('zones', [])
+
+        # After reading image, weâ€™ll get actual image size:
+        display_w = int(data.get("display_width") or 1)
+        display_h = int(data.get("display_height") or 1)
+
+        # Will be calculated AFTER image is loaded below
+        scale_x = scale_y = 1.0
+
         
         if not secure_filename(filename) == filename:
             return jsonify({'error': 'Invalid filename'}), 400
@@ -114,6 +123,23 @@ def analyze_image():
             return jsonify({'error': 'Cannot read image file'}), 400
         
         height, width = image.shape[:2]
+
+        if display_w > 1 and display_h > 1:
+            display_w = data.get("displayWidth", width)
+            display_h = data.get("displayHeight", height)
+
+            scale_x = width / display_w
+            scale_y = height / display_h
+
+
+        def _scale_zone(z):
+            scaled = dict(z)
+            scaled["points"] = [[float(p[0]) * scale_x, float(p[1]) * scale_y] for p in z.get("points", [])]
+            return scaled
+
+        zones = [_scale_zone(z) for z in zones_raw]
+
+
         
         results = {
             'image_info': {
@@ -170,18 +196,22 @@ def analyze_image():
                     'display_name': display_name
                 }
         
-        # Use YOLOv12 results as primary for violations (latest & strongest)
-        primary_detections = results['detections'].get('yolov12', {}).get('detections', [])
-        
-        if zones and zone_analyzer and primary_detections:
+        # Get selected model from frontend (default = yolov8)
+        selected_algo = data.get('selected_algo', 'yolov8')
+
+        # Use the chosen model’s detections as primary
+        primary_detections = results['detections'].get(selected_algo, {}).get('detections', [])
+
+        if zones and primary_detections:
             try:
-                violations = zone_analyzer.check_violations(zones, primary_detections)
+                violations = zone_analyzer.detect_violations(primary_detections, zones)
                 results['violations'] = violations
-                logger.info(f"Found {len(violations)} violations")
+                logger.info(f"Found {len(violations)} violations using {selected_algo}")
             except Exception as e:
-                logger.error(f"Violation checking error: {e}")
+                logger.error(f"Violation detection error: {e}")
                 results['violations'] = []
-        
+
+                
         total_spots = sum(1 for zone in zones if zone.get('type') in ['standard', 'vip', 'handicap'])
         if total_spots > 0:
             occupied_spots = min(len(primary_detections), total_spots)
@@ -198,6 +228,11 @@ def analyze_image():
             'average_processing_time': round(sum(processing_times) / len(processing_times), 3) if processing_times else 0,
             'fastest_algorithm': min(results['detections'].items(), key=lambda x: x[1].get('processing_time', float('inf')))[0] if processing_times else None
         }
+        
+         # Echo back selected model
+        results['primary_algo'] = selected_algo
+
+
         
         return jsonify(results)
     
